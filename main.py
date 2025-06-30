@@ -1,20 +1,29 @@
 from flask import Flask, request, jsonify
-from transformers import pipeline
 from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore
 from collections import defaultdict, Counter
 import statistics
+import requests
 import os
 
-# Step 1: Initialize Flask app
 app = Flask(__name__)
 
-# Step 2: Load Emotion & Risk Classifier Models (same public model for now)
-emotion_classifier = pipeline("text-classification", model="bhadresh-savani/bert-base-uncased-emotion")
-risk_classifier = pipeline("text-classification", model="bhadresh-savani/bert-base-uncased-emotion")
+# Hugging Face Inference API setup
+HUGGINGFACE_MODEL_URL = "https://api-inference.huggingface.co/models/bhadresh-savani/bert-base-uncased-emotion"
+HF_HEADERS = {"Authorization": f"Bearer {os.getenv('HF_TOKEN')}"}
 
-# Step 3: Crisis Keywords
+def classify_text(text):
+    response = requests.post(
+        HUGGINGFACE_MODEL_URL,
+        headers=HF_HEADERS,
+        json={"inputs": text},
+        timeout=30
+    )
+    response.raise_for_status()
+    return response.json()[0]
+
+# Crisis Keywords
 crisis_keywords = {
     "hopeless", "worthless", "suicidal", "kill myself",
     "give up", "end it all", "can't go on", "no purpose",
@@ -23,7 +32,7 @@ crisis_keywords = {
     "I hate living", "I’m done with life", "I want it to end"
 }
 
-# Step 4: Initialize Firebase
+# Initialize Firebase
 cred = credentials.Certificate({
     "type": "service_account",
     "project_id": os.getenv("FIREBASE_PROJECT_ID"),
@@ -36,16 +45,14 @@ cred = credentials.Certificate({
     "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
     "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_CERT_URL")
 })
-
+firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# Utility: Format timestamp
 def to_date(timestamp):
     if isinstance(timestamp, str):
         timestamp = datetime.fromisoformat(timestamp)
     return timestamp.strftime('%Y-%m-%d')
 
-# Step 5: Analyze Mood (Text)
 @app.route('/analyzeMood', methods=['POST'])
 def analyze_mood():
     try:
@@ -56,12 +63,12 @@ def analyze_mood():
         user_text = data['text']
         user_id = data['user_id']
 
-        result = emotion_classifier(user_text)[0]
+        result = classify_text(user_text)
         emotion = result['label']
         confidence = round(result['score'], 2)
 
         keyword_crisis = any(word in user_text.lower() for word in crisis_keywords)
-        risk_result = risk_classifier(user_text)[0]
+        risk_result = result  # reuse same result
         risk_label = risk_result['label'].lower()
         risk_score = risk_result['score']
         ai_crisis = risk_label in {"sadness", "anger", "fear"} and risk_score > 0.85
@@ -99,7 +106,6 @@ def analyze_mood():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Step 6: Set Emergency Code Word + Contact
 @app.route('/setEmergency', methods=['POST'])
 def set_emergency_code():
     try:
@@ -117,7 +123,6 @@ def set_emergency_code():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Step 7: Get Mood Trends
 @app.route('/getMoodTrends', methods=['POST'])
 def get_mood_trends():
     try:
@@ -165,7 +170,6 @@ def get_mood_trends():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Step 8: Log Visual Emotion (via camera)
 @app.route('/logVisualEmotion', methods=['POST'])
 def log_visual_emotion():
     try:
@@ -189,7 +193,6 @@ def log_visual_emotion():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ Step 9: Submit Daily Check-In (Slider + Tags + Optional Note)
 @app.route('/submitCheckIn', methods=['POST'])
 def submit_checkin():
     try:
@@ -213,7 +216,6 @@ def submit_checkin():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Step 10: Run App
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8000))
     app.run(debug=True, host="0.0.0.0", port=port)
